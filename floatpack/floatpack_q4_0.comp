@@ -1,0 +1,97 @@
+#version 450
+
+// Fused Q4_0 dequant + matmul shader
+// A: Q4_0 blocks packed contiguously in uint[] (each block = 18 bytes)
+//    Row stride in bytes: K_blocks * 18
+//    Block byte layout: [fp16 scale (2B)] [16 nibble bytes]
+// B: F32 row-major K x N
+// C: F32 row-major M x N output
+// Workgroup: 8x8 threads, computes 8x8 tile of C
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, binding = 0) readonly buffer A_buf  { uint A[]; };
+layout(std430, binding = 1) readonly buffer B_buf  { float B[]; };
+layout(std430, binding = 2) buffer       C_buf  { float C[]; };
+
+layout(push_constant) uniform Params {
+    int M;
+    int N;
+    int K_blocks; // K / 32
+} p;
+
+shared float sh_w[256]; // 8 rows x 32 dequantized weights
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    uint col = gl_GlobalInvocationID.y;
+    if (row >= p.M || col >= p.N) return;
+
+    int lx = int(gl_LocalInvocationID.x);
+    int ly = int(gl_LocalInvocationID.y);
+    int row_stride = p.K_blocks * 18; // bytes per row of A
+    int base_row = int(gl_WorkGroupID.x) * 8;
+
+    float acc = 0.0;
+
+    for (int kb = 0; kb < p.K_blocks; kb++) {
+        // --- Load Q4_0 block for this workgroup's rows ---
+        int phys_row = base_row + ly;
+        if (phys_row < p.M) {
+            int boff = phys_row * row_stride + kb * 18; // byte offset
+            int uoff = boff / 4; // uint offset (may be unaligned)
+
+            // Load 5 uints covering bytes boff..boff+17 (block is 18 bytes)
+            uint w[5];
+            w[0] = A[uoff];
+            w[1] = A[uoff + 1];
+            w[2] = A[uoff + 2];
+            w[3] = A[uoff + 3];
+            w[4] = A[uoff + 4];
+
+            // Extract fp16 scale from bytes 0-1 (within the 5-uint window)
+            int boff_mod4 = boff % 4;
+            uint scale_bits = (w[0] >> (boff_mod4 * 8)) & 0xFFFFu;
+
+            // fp16 -> f32
+            uint s = (scale_bits >> 15) & 1u;
+            uint e = (scale_bits >> 10) & 0x1Fu;
+            uint m = scale_bits & 0x3FFu;
+            float d;
+            if (e == 0u) { d = 0.0; }
+            else {
+                d = uintBitsToFloat((s << 31) | ((e + 112u) << 23) | (m << 13));
+            }
+
+            // Thread lx extracts 2 nibble bytes: bytes (boff+2+lx*2) and (boff+3+lx*2)
+            // Map to uint index and shift within window
+            int nib_byte0_off = 2 + lx * 2; // within-block offset: 0,2,4,...,14
+            int abs_byte_off   = boff + nib_byte0_off;
+            int widx = abs_byte_off / 4 - uoff; // which of w[0..4]
+            int bshift = (abs_byte_off % 4) * 8;
+
+            uint word = w[widx];
+            uint by0 = (word >> bshift) & 0xFFu;
+            uint by1 = (word >> (bshift + 8)) & 0xFFu;
+
+            uint lo0 = by0 & 0xFu; uint hi0 = (by0 >> 4) & 0xFu;
+            uint lo1 = by1 & 0xFu; uint hi1 = (by1 >> 4) & 0xFu;
+
+            int idx = lx * 4;
+            sh_w[ly * 32 + idx + 0] = d * (float(int(lo0)) - 8.0);
+            sh_w[ly * 32 + idx + 1] = d * (float(int(hi0)) - 8.0);
+            sh_w[ly * 32 + idx + 2] = d * (float(int(lo1)) - 8.0);
+            sh_w[ly * 32 + idx + 3] = d * (float(int(hi1)) - 8.0);
+        }
+        barrier();
+        memoryBarrierShared();
+
+        // --- Dot product ---
+        for (int j = 0; j < 32; j++) {
+            acc += sh_w[lx * 32 + j] * B[(kb * 32 + j) * p.N + int(col)];
+        }
+        barrier();
+    }
+
+    C[row * p.N + col] = acc;
+}

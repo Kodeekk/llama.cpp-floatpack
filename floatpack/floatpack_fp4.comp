@@ -1,0 +1,48 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : enable
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// Input: A (M x K/4) row-major, B (N x K/4) column-major, both packed as uint16_t
+layout(std430, binding = 0) readonly buffer A_buf { uint16_t A[]; };
+layout(std430, binding = 1) readonly buffer B_buf { uint16_t B[]; };
+layout(std430, binding = 2) buffer       C_buf { float C[]; };
+
+// LUT: 256 floats (storage buffer to avoid std140's 16-byte array stride)
+layout(std430, binding = 3) readonly buffer LUT_buf { float lut[]; };
+
+layout(push_constant) uniform Dims {
+    int M;
+    int N;
+    int K_div4;
+} dims;
+
+void main() {
+    int row = int(gl_GlobalInvocationID.x);
+    int col = int(gl_GlobalInvocationID.y);
+    if (row >= dims.M || col >= dims.N) return;
+
+    float acc = 0.0;
+
+    for (int k = 0; k < dims.K_div4; k++) {
+        uint16_t a_packed = A[row * dims.K_div4 + k];
+        uint16_t b_packed = B[col * dims.K_div4 + k];
+
+        uint a0 = uint(a_packed) & 0xFu;
+        uint a1 = (uint(a_packed) >> 4)  & 0xFu;
+        uint a2 = (uint(a_packed) >> 8)  & 0xFu;
+        uint a3 = (uint(a_packed) >> 12) & 0xFu;
+
+        uint b0 = uint(b_packed) & 0xFu;
+        uint b1 = (uint(b_packed) >> 4)  & 0xFu;
+        uint b2 = (uint(b_packed) >> 8)  & 0xFu;
+        uint b3 = (uint(b_packed) >> 12) & 0xFu;
+
+        acc += lut[(a0 << 4) | b0];
+        acc += lut[(a1 << 4) | b1];
+        acc += lut[(a2 << 4) | b2];
+        acc += lut[(a3 << 4) | b3];
+    }
+
+    C[row * dims.N + col] = acc;
+}

@@ -169,6 +169,8 @@ llama_option_depr(WARNING     LLAMA_SYCL_F16            GGML_SYCL_F16)
 llama_option_depr(WARNING     LLAMA_CANN                GGML_CANN)
 llama_option_depr(WARNING     LLAMA_CURL)
 
+option(LLAMA_FLOATPACK "llama: build floatpack FP4 Vulkan backend" OFF)
+
 include("cmake/license.cmake")
 license_add_file("llama.cpp" "LICENSE")
 
@@ -194,6 +196,14 @@ endif()
 #
 
 add_subdirectory(src)
+
+if (LLAMA_FLOATPACK)
+    add_subdirectory(floatpack)
+    target_link_libraries(llama PRIVATE floatpack)
+    target_compile_definitions(ggml-vulkan PRIVATE LLAMA_FLOATPACK)
+    target_include_directories(ggml-vulkan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(ggml-vulkan PRIVATE floatpack)
+endif()
 
 #
 # utils, programs, examples and tests

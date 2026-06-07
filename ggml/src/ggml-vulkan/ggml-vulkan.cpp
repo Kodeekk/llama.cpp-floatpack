@@ -4,6 +4,9 @@
 #include <chrono>
 #include "ggml-cpu.h"
 #endif
+#ifdef LLAMA_FLOATPACK
+#include "floatpack/floatpack.h"
+#endif
 
 // See https://github.com/KhronosGroup/Vulkan-Hpp?tab=readme-ov-file#extensions--per-device-function-pointers-
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
@@ -6722,6 +6725,10 @@ static void ggml_vk_init(ggml_backend_vk_context * ctx, size_t idx) {
     vk_skip_checks = (skip_checks == NULL ? 0 : atoi(skip_checks));
     const char* output_tensor = getenv("GGML_VULKAN_OUTPUT_TENSOR");
     vk_output_tensor = (output_tensor == NULL ? 0 : atoi(output_tensor));
+#endif
+
+#ifdef LLAMA_FLOATPACK
+    floatpack_init();
 #endif
 }
 
